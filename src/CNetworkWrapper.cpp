@@ -4,6 +4,7 @@
 #include "CoursesHandler.h"
 #include "RegistrationHandler.h"
 #include "ErrorHandler.h"
+#include "TopicHandler.h"
 
 CNetworkWrapper::CNetworkWrapper(QObject *parent)
     : QObject(parent),
@@ -13,16 +14,19 @@ CNetworkWrapper::CNetworkWrapper(QObject *parent)
     // Настройка SSL
     QSslConfiguration sslConfig = QSslConfiguration::defaultConfiguration();
     sslConfig.setProtocol(QSsl::TlsV1_2OrLater);
+    sslConfig.setPeerVerifyMode(QSslSocket::VerifyNone); // Временно для тестов
     QSslConfiguration::setDefaultConfiguration(sslConfig);
 
-    connect(manager, &QNetworkAccessManager::finished, this, [this](QNetworkReply* reply) {
+    
+   /*connect(manager, &QNetworkAccessManager::finished, this, [this](QNetworkReply* reply) {
         QByteArray data = reply->readAll(); // Читаем данные здесь
         handleNetworkReply(reply, data);    // Передаем reply и данные в слот
         reply->deleteLater();               // Удаляем reply после обработки
-    });
+    });*/
     
     initRefreshTimer();
     loadTokens();
+    manager->setRedirectPolicy(QNetworkRequest::NoLessSafeRedirectPolicy);
     
     // Отложенная проверка сессии после инициализации
         QTimer::singleShot(0, this, [this]() {
@@ -81,15 +85,58 @@ void CNetworkWrapper::fetchCourses() {
         return;
     }
 
-    QNetworkRequest request(QUrl(baseUrl + "/api/courses/"));
+    QUrl url(baseUrl + "/api/courses/courses");
+    QNetworkRequest request(url);
     request.setRawHeader("Authorization", "Bearer " + accessToken.toUtf8());
     
-    // Отладочный вывод заголовка
-    qDebug() << "[fetchCourses] Authorization header:" << request.rawHeader("Authorization");
+    qDebug() << "[fetchCourses] Request URL:" << url.toString();
     
-    manager->get(request);
+    QNetworkReply* reply = manager->get(request); // Сохраняем reply
+
+    // Подключаем обработчик завершения запроса
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        QByteArray response = reply->readAll();
+        const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        
+        qDebug() << "Courses response status:" << status;
+        qDebug() << "Courses response data:" << response;
+
+        if (reply->error() == QNetworkReply::NoError) {
+            handleNetworkReply(reply, response);
+        } else {
+            handleNetworkError(reply, status, response);
+        }
+        reply->deleteLater();
+    });
+    
 }
 
+void CNetworkWrapper::fetchTopics(int courseId, int parentTopicId) {
+    if (accessToken.isEmpty()) {
+        emit errorOccurred("Not authenticated");
+        return;
+    }
+
+    // Формируем URL по структуре из curl-примера
+    QString endpoint = parentTopicId == -1
+        ? QString("/api/courses/%1/themes/").arg(courseId)
+        : QString("/api/courses/%1/themes/%2/").arg(courseId).arg(parentTopicId);
+
+    QUrl url(baseUrl + endpoint);
+    QNetworkRequest request(url);
+    request.setRawHeader("Authorization", "Bearer " + accessToken.toUtf8());
+    
+    // Сохраняем контекст (parentTopicId) в свойстве reply
+    QNetworkReply* reply = manager->get(request);
+    reply->setProperty("parentTopicId", parentTopicId);
+    
+    // Обработка через общий handleNetworkReply
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        QByteArray data = reply->readAll();
+        handleNetworkReply(reply, data);
+        reply->deleteLater();
+    });
+}
 void CNetworkWrapper::refreshAuthToken() {
     if (refreshToken.isEmpty()) {
         emit reauthenticationRequired();
@@ -162,11 +209,24 @@ void CNetworkWrapper::sendPostRequest(const QString& endpoint, const QJsonObject
 
 void CNetworkWrapper::handleNetworkReply(QNetworkReply* reply, const QByteArray& data) {
     const auto status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    QByteArray cleanedData = data.trimmed().replace("\\n", "");
     
     // Выводим сырые байты для отладки
         qDebug() << "Raw response bytes:" << data.toHex();
         qDebug() << "Response as string:" << QString::fromUtf8(data);
 
+    // Игнорировать пустые ответы с допустимыми статусами
+        if (cleanedData.isEmpty()) {
+            if (status == 204) { // 204 No Content - нормальное поведение
+                qDebug() << "Empty response (HTTP 204) - ignoring";
+                reply->deleteLater();
+                return;
+            }
+            qDebug() << "Empty response with status" << status << "- ignoring";
+            reply->deleteLater();
+            return; // Просто выходим, не эмитируя ошибку
+        }
+    
     if (data.isEmpty()) {
             emit errorOccurred("Empty response from server");
             reply->deleteLater();
@@ -178,22 +238,34 @@ void CNetworkWrapper::handleNetworkReply(QNetworkReply* reply, const QByteArray&
         reply->deleteLater();
         return;
     }
-
+    // Декодируем HTML-сущности
+    //cleanedData = QTextCodec::codecForName("UTF-8")->toUnicode(cleanedData).toUtf8();
+        
+    // Проверяем валидность JSON
     QJsonParseError parseError;
-    QJsonDocument doc = QJsonDocument::fromJson(data, &parseError);
-    
+    QJsonDocument doc = QJsonDocument::fromJson(cleanedData, &parseError);
     if (parseError.error != QJsonParseError::NoError) {
         emit errorOccurred("Invalid JSON response");
         reply->deleteLater();
         return;
     }
+    // Если данные начинаются с '[', парсим как массив
+        if (cleanedData.startsWith('[')) {
+            doc = QJsonDocument::fromJson(cleanedData, &parseError);
+            QJsonObject wrapper;
+            wrapper["courses"] = doc.array(); // Оборачиваем массив в объект
+            doc = QJsonDocument(wrapper);
+        } else {
+            doc = QJsonDocument::fromJson(cleanedData, &parseError);
+        }
 
+    
     // Создаем обработчик через фабрику
     ResponseHandler* handler = HandlerFactory::createHandler(doc.object());
     if (!handler) {
-        emit errorOccurred("Unknown response type");
+        qDebug() << "Empty or unrecognized response - ignoring";
         reply->deleteLater();
-        return;
+        return; // Не эмитируем ошибку
     }
 
     // Подключаем обработчики сигналов
@@ -214,6 +286,17 @@ void CNetworkWrapper::handleNetworkReply(QNetworkReply* reply, const QByteArray&
     else if (auto coursesHandler = qobject_cast<CoursesHandler*>(handler)) {
         connect(coursesHandler, &CoursesHandler::coursesDataReceived,
                 this, &CNetworkWrapper::coursesReceived);
+    }
+    else if (auto topicHandler = qobject_cast<TopicHandler*>(handler)) {
+        int parentTopicId = reply->property("parentTopicId").toInt();
+        
+        connect(topicHandler, &TopicHandler::subtopicsReceived,
+                this, [this, parentTopicId](int topicId, const QJsonArray& subtopics) {
+                    emit subtopicsFetched(parentTopicId, subtopics);
+                });
+        
+        connect(topicHandler, &TopicHandler::materialsReceived,
+                this, &CNetworkWrapper::materialsFetched);
     }
     else if (auto regHandler = qobject_cast<RegistrationHandler*>(handler)) {
         connect(regHandler, &RegistrationHandler::registrationSuccess,

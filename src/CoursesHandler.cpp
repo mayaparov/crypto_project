@@ -1,37 +1,33 @@
-// CoursesHandler.cpp
 #include "CoursesHandler.h"
-#include <QJsonArray>  // Добавляем для работы с QJsonArray
 
+CoursesHandler::CoursesHandler(QObject* parent)
+    : ResponseHandler(parent) {}
 
 void CoursesHandler::process(const QJsonObject& response) {
-    // Проверяем наличие ключа "results" вместо "courses"
-    if (!response.contains("results") || !response["results"].isArray()) {
-        emit error("Invalid courses response");
-        return;
+    // Если ответ содержит ключ "courses"
+    if (response.contains("courses") && response["courses"].isArray()) {
+        handleCoursesArray(response["courses"].toArray());
     }
+    // Если ответ - корневой массив (обернут в объект на предыдущем этапе)
+    else if (response.contains("_wrapped_array") && response["_wrapped_array"].isArray()) {
+        handleCoursesArray(response["_wrapped_array"].toArray());
+    }
+    else {
+        emit error("Invalid courses format");
+    }
+}
 
-    QJsonArray coursesArray = response["results"].toArray();
-    QJsonArray processedCourses;
-
-    for (const auto& courseValue : coursesArray) {
-        if (!courseValue.isObject()) {
-            emit error("Invalid course entry");
-            continue;
-        }
-        
-        QJsonObject course = courseValue.toObject();
-        if (course.contains("title") && course["title"].isString()) {
-            // Сохраняем полный объект курса
-            processedCourses.append(course);
-        } else {
-            emit error("Course missing title");
+void CoursesHandler::handleCoursesArray(const QJsonArray& coursesArray) {
+    QJsonArray processed;
+    for (const auto& course : coursesArray) {
+        if (course.isObject()) {
+            processed.append(course.toObject());
         }
     }
     
-    if (processedCourses.isEmpty()) {
+    if (processed.isEmpty()) {
         emit error("No valid courses found");
-        return;
+    } else {
+        emit coursesDataReceived(processed);
     }
-    
-    emit coursesDataReceived(processedCourses); // Отправляем QJsonArray
 }

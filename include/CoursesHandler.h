@@ -1,28 +1,19 @@
-// Файл: CoursesHandler.h
 #ifndef COURSESHANDLER_H
 #define COURSESHANDLER_H
 
 #include "ResponseHandler.h"
-#include <QJsonObject>
-#include <QDebug>
+#include <QJsonArray>
 
-/**
- * @class CoursesHandler
- * @brief Обработчик ответов со списком курсов
- */
 class CoursesHandler : public ResponseHandler {
     Q_OBJECT
 public:
-    explicit CoursesHandler(QObject* parent = nullptr) : ResponseHandler(parent){}
+    explicit CoursesHandler(QObject* parent = nullptr);
 
+    void process(const QJsonObject& response) override; // Сохраняем сигнатуру
     
-    void process(const QJsonObject& response) override;
+    void handleCoursesArray(const QJsonArray& coursesArray);
 
 signals:
-    /**
-     * @brief Сигнал успешного получения курсов
-     * @param courses курсы, полученные от сервера
-     */
     void coursesDataReceived(const QJsonArray& courses);
 };
 

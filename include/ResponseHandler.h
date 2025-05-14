@@ -4,6 +4,7 @@
 
 #include <QObject>
 #include <QJsonObject>
+#include "qjsondocument.h"
 
 /**
  * @class ResponseHandler

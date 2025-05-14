@@ -113,7 +113,14 @@ signals:
      * @param message Описание ошибки
      */
     void errorOccurred(const QString& message);
+    
+    void subtopicsFetched(int parentTopicId, const QJsonArray& subtopics);
+    void materialsFetched(int topicId, const QJsonArray& materials);
 
+    public slots:
+    void fetchTopics(int courseId, int parentTopicId = -1);
+
+    
 private slots:
     void handleNetworkReply(QNetworkReply* reply, const QByteArray& data);
 
